@@ -37,6 +37,18 @@ mod tests {
     }
 
     #[test]
+    fn should_support_swap_dims_on_2_dims() {
+        let tensor = TestTensor::from_data_devauto([[1., 2.], [3., 4.]]).swap_dims(0, 1);
+        let flat_tensor = tensor.clone().flatten(0, 1);
+
+        let data_actual = tensor.into_data();
+        let flat_data = flat_tensor.into_data();
+
+        assert_eq!(data_actual, Data::from([[1.0, 3.0], [2.0, 4.0]]));
+        assert_eq!(flat_data, Data::from([1.0, 3.0, 2.0, 4.0]));
+    }
+
+    #[test]
     fn should_support_transpose_ops_int() {
         let tensor = Tensor::<TestBackend, 3, Int>::from_data_devauto([
             [[0, 1, 2], [3, 4, 5]],
