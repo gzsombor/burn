@@ -934,6 +934,65 @@ fn test_attention_decode_steps() {
     assert_attention_matches_fallback([4, 8, 2, 1, 1000, 128], Default::default());
 }
 
+/// A decode step over a KV cache: one query attends the last `window` keys. cubek reads a
+/// single query position as a `Recent` window rather than a per-query `Windowed` one.
+#[test]
+fn test_attention_sliding_window_decode_step() {
+    let [num_batches, num_heads, seq_q, seq_kv, head_dim] = [2, 8, 1, 32, 16];
+    let device = Default::default();
+    let window = 4;
+    let random =
+        |shape: [usize; 4]| TestTensor::<4>::random(shape, Distribution::Uniform(-1., 1.), &device);
+    let query = random([num_batches, num_heads, seq_q, head_dim]);
+    let key = random([num_batches, num_heads, seq_kv, head_dim]);
+    let value = random([num_batches, num_heads, seq_kv, head_dim]);
+
+    let options = AttentionModuleOptions {
+        sliding_window: Some(window),
+        ..Default::default()
+    };
+    let mask = TestTensorBool::<4>::from_bool(
+        sliding_window_mask(num_batches, num_heads, seq_q, seq_kv, window),
+        &device,
+    );
+
+    let output = attention(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        None,
+        None,
+        options,
+    );
+    let expected = attention(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        Some(mask.clone()),
+        None,
+        Default::default(),
+    );
+    output.into_data().assert_approx_eq::<FloatElem>(
+        &expected.into_data(),
+        Tolerance::rel_abs(1e-2, 1e-3).set_half_precision_relative(1e-1),
+    );
+
+    let fallback = attention_fallback(
+        query.clone(),
+        key.clone(),
+        value.clone(),
+        None,
+        None,
+        options,
+    );
+    let fallback_expected =
+        attention_fallback(query, key, value, Some(mask), None, Default::default());
+    fallback.into_data().assert_approx_eq::<FloatElem>(
+        &fallback_expected.into_data(),
+        Tolerance::rel_abs(1e-2, 1e-3).set_half_precision_relative(1e-1),
+    );
+}
+
 /// A causal chunk: fewer queries than keys, the queries the last positions of the keys.
 #[test]
 fn test_attention_causal_chunk() {

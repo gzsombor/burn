@@ -7,7 +7,7 @@ use burn_tensor::ops::{AttentionModuleOptions, CausalAlignment};
 use burn_tensor::{Bool, Distribution, Tensor, TensorData, Tolerance};
 
 /// Attention gradients match the same computation spelled out as tensor ops, for every
-/// option. `sq != sk` pins the causal mask to the bottom-right corner.
+/// option. `sq != sk` pins the causal and sliding-window masks to the bottom-right corner.
 #[test]
 fn attention_grads_match_composed_ops() {
     let device = AutodiffDevice::new();
@@ -31,13 +31,29 @@ fn attention_grads_match_composed_ops() {
             .collect::<Vec<_>>(),
         [1, 1, sq, sk],
     );
+    let window_data = |window: u32| {
+        let window = window as i64;
+        TensorData::new(
+            (0..sq * sk)
+                .map(|i| {
+                    let query = (i / sk) as i64;
+                    let key = (i % sk) as i64;
+                    let right = query + sk as i64 - sq as i64;
+                    key > right || key < right - (window - 1)
+                })
+                .collect::<Vec<_>>(),
+            [1, 1, sq, sk],
+        )
+    };
 
-    for (is_causal, softcap, masked, scale) in [
-        (false, None, false, None),
-        (true, None, false, None),
-        (false, Some(2.0), false, None),
-        (false, None, true, Some(0.3)),
-        (true, Some(5.0), true, None),
+    for (is_causal, softcap, masked, scale, sliding_window) in [
+        (false, None, false, None, None),
+        (true, None, false, None, None),
+        (false, Some(2.0), false, None, None),
+        (false, None, true, Some(0.3), None),
+        (true, Some(5.0), true, None, None),
+        (false, None, false, None, Some(3)),
+        (true, None, false, None, Some(4)),
     ] {
         let run = |composed: bool| {
             let q = TestTensor::<4>::from_data(q_data.clone(), &device).require_grad();
@@ -63,12 +79,18 @@ fn attention_grads_match_composed_ops() {
                         .expand([b, h, sq, sk]);
                     scores = scores.mask_fill(causal, f32::NEG_INFINITY);
                 }
+                if let Some(window) = sliding_window {
+                    let window = Tensor::<4, Bool>::from_data(window_data(window), &device)
+                        .expand([b, h, sq, sk]);
+                    scores = scores.mask_fill(window, f32::NEG_INFINITY);
+                }
                 softmax(scores, 3).matmul(v.clone())
             } else {
                 let options = AttentionModuleOptions {
                     scale,
                     softcap,
                     is_causal,
+                    sliding_window,
                     ..Default::default()
                 };
                 let bias = masked.then(|| bias.clone());
@@ -165,8 +187,9 @@ fn attention_grouped_query_grads_match_repeated_kv() {
 
 /// The two operations a backend's own attention backward pass is made of, called directly: the
 /// forward with its logsumexp is the attention, and the backward's gradients are autodiff's over
-/// the decomposed attention ([`attention_fallback`], never the backend's own backward pass), for grouped heads, a custom scale, causal masks of either anchor and
-/// a softcap. A backend without kernels of its own runs the composed defaults.
+/// the decomposed attention ([`attention_fallback`], never the backend's own backward pass), for
+/// grouped heads, a custom scale, causal masks of either anchor, sliding windows and a softcap.
+/// A backend without kernels of its own runs the composed defaults.
 #[test]
 fn attention_backward_matches_autodiff_over_the_decomposed_attention() {
     let device = AutodiffDevice::new();
@@ -196,6 +219,15 @@ fn attention_backward_matches_autodiff_over_the_decomposed_attention() {
         },
         AttentionModuleOptions {
             softcap: Some(4.0),
+            ..Default::default()
+        },
+        AttentionModuleOptions {
+            sliding_window: Some(3),
+            ..Default::default()
+        },
+        AttentionModuleOptions {
+            is_causal: true,
+            sliding_window: Some(4),
             ..Default::default()
         },
     ] {
